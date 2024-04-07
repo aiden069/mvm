@@ -102,11 +102,6 @@ type Backend interface {
 	IsRpcProxySupport() bool
 	ProxyTransaction(ctx context.Context, tx *types.Transaction) error
 	ProxyEstimateGas(ctx context.Context, arg interface{}) (uint64, error)
-	IsSequencerWorking() bool
-	AddSequencerInfo(ctx context.Context, seq *types.SequencerInfo) error
-	ListSequencerInfo(ctx context.Context) *types.SequencerInfoList
-	// rollup bridge API
-	SetPreRespan(ctx context.Context, oldAddress common.Address, newAddress common.Address, number uint64) error
 
 	// Metis-specific API
 	FinalizedBlockNumber() (uint64, error)

@@ -2,7 +2,7 @@ package rollup
 
 import (
 	"context"
-	"encoding/hex"
+	"crypto/ecdsa"
 	"errors"
 	"fmt"
 	"math/big"
@@ -12,19 +12,19 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ethereum-optimism/optimism/l2geth/accounts/abi/bind"
 	"github.com/ethereum-optimism/optimism/l2geth/common"
+	"github.com/ethereum-optimism/optimism/l2geth/common/hexutil"
 	"github.com/ethereum-optimism/optimism/l2geth/core"
+	"github.com/ethereum-optimism/optimism/l2geth/core/rawdb"
 	"github.com/ethereum-optimism/optimism/l2geth/core/state"
+	"github.com/ethereum-optimism/optimism/l2geth/core/types"
 	"github.com/ethereum-optimism/optimism/l2geth/crypto"
+	"github.com/ethereum-optimism/optimism/l2geth/eth/gasprice"
 	"github.com/ethereum-optimism/optimism/l2geth/ethclient"
 	"github.com/ethereum-optimism/optimism/l2geth/ethdb"
 	"github.com/ethereum-optimism/optimism/l2geth/event"
 	"github.com/ethereum-optimism/optimism/l2geth/log"
-
-	"github.com/ethereum-optimism/optimism/l2geth/core/rawdb"
-	"github.com/ethereum-optimism/optimism/l2geth/core/types"
-
-	"github.com/ethereum-optimism/optimism/l2geth/eth/gasprice"
 	"github.com/ethereum-optimism/optimism/l2geth/rollup/fees"
 	"github.com/ethereum-optimism/optimism/l2geth/rollup/rcfg"
 )
@@ -40,18 +40,6 @@ var (
 	// with gas price zero and fees are currently enforced
 	errZeroGasPriceTx = errors.New("cannot accept 0 gas price transaction")
 	float1            = big.NewFloat(1)
-)
-
-var (
-	// l2GasPriceSlot refers to the storage slot that the L2 gas price is stored
-	// in in the OVM_GasPriceOracle predeploy
-	l2GasPriceSlot = common.BigToHash(big.NewInt(1))
-	// l2GasPriceOracleOwnerSlot refers to the storage slot that the owner of
-	// the OVM_GasPriceOracle is stored in
-	l2GasPriceOracleOwnerSlot = common.BigToHash(big.NewInt(0))
-	// l2GasPriceOracleAddress is the address of the OVM_GasPriceOracle
-	// predeploy
-	l2GasPriceOracleAddress = common.HexToAddress("0x420000000000000000000000000000000000000F")
 )
 
 // SyncService implements the main functionality around pulling in transactions
@@ -94,14 +82,14 @@ type SyncService struct {
 	decSeqValidHeight uint64
 	startSeqHeight    uint64
 	seqClientHttp     string
-	SeqAddress        string
-	seqPriv           string
+	SeqAddress        common.Address
+	seqPriv           *ecdsa.PrivateKey
 
-	syncQueueFromOthers chan *types.Block
+	syncQueueFromOthers <-chan *types.Block
 }
 
 // NewSyncService returns an initialized sync service
-func NewSyncService(ctx context.Context, cfg Config, txpool *core.TxPool, bc *core.BlockChain, db ethdb.Database, syncQueueFromOthers chan *types.Block) (*SyncService, error) {
+func NewSyncService(ctx context.Context, cfg Config, txpool *core.TxPool, bc *core.BlockChain, db ethdb.Database, backend bind.ContractBackend, syncQueueFromOthers <-chan *types.Block) (*SyncService, error) {
 	if bc == nil {
 		return nil, errors.New("Must pass BlockChain to SyncService")
 	}
@@ -137,8 +125,14 @@ func NewSyncService(ctx context.Context, cfg Config, txpool *core.TxPool, bc *co
 	client := NewClient(cfg.RollupClientHttp, chainID)
 	log.Info("Configured rollup client", "url", cfg.RollupClientHttp, "chain-id", chainID.Uint64(), "ctc-deploy-height", cfg.CanonicalTransactionChainDeployHeight)
 
-	seqAdapter := NewSeqAdapter(cfg.SeqsetContract, cfg.SeqsetValidHeight, cfg.PosClientHttp, cfg.LocalL2ClientHttp, bc)
-	log.Info("Configured seqAdapter", "url", cfg.PosClientHttp, "SeqsetContract", cfg.SeqsetContract, "SeqsetValidHeight", cfg.SeqsetValidHeight, "SeqAddress", cfg.SeqAddress, "LocalL2ClientHttp", cfg.LocalL2ClientHttp)
+	seqAdapter, err := NewSeqAdapter(bc, backend)
+	if err != nil {
+		return nil, err
+	}
+
+	seqsetConfig := bc.Config().MetisRollupConfig()
+	log.Info("Configured seqAdapter", "url", cfg.PosClientHttp, "SeqsetContract", seqsetConfig.SeqSetContract.String(),
+		"SeqsetValidHeight", seqsetConfig.SeqSetHeight, "SeqAddress", cfg.SeqAddress)
 	// Ensure sane values for the fee thresholds
 	if cfg.FeeThresholdDown != nil {
 		// The fee threshold down should be less than 1
@@ -180,12 +174,31 @@ func NewSyncService(ctx context.Context, cfg Config, txpool *core.TxPool, bc *co
 		feeThresholdDown: cfg.FeeThresholdDown,
 		feeThresholdUp:   cfg.FeeThresholdUp,
 
-		decSeqValidHeight:   cfg.SeqsetValidHeight,
 		startSeqHeight:      uint64(0),
 		seqClientHttp:       cfg.SequencerClientHttp,
-		SeqAddress:          cfg.SeqAddress,
-		seqPriv:             cfg.SeqPriv,
 		syncQueueFromOthers: syncQueueFromOthers,
+	}
+
+	if cfg.SeqPriv != "" {
+		rawKey, err := hexutil.Decode(cfg.SeqPriv)
+		if err != nil {
+			return nil, fmt.Errorf("Invalid sequencer private key")
+		}
+
+		privateKey, err := crypto.ToECDSA(rawKey)
+		if err != nil {
+			return nil, fmt.Errorf("Invalid sequencer private key")
+		}
+
+		publicKey := privateKey.Public()
+		publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
+		if !ok {
+			return nil, fmt.Errorf("publicKey is not of type *ecdsa.PublicKey")
+		}
+		address := crypto.PubkeyToAddress(*publicKeyECDSA)
+
+		service.seqPriv = privateKey
+		service.SeqAddress = address
 	}
 
 	// The chainHeadSub is used to synchronize the SyncService with the chain.
@@ -382,7 +395,7 @@ func (s *SyncService) initializeLatestL1(ctcDeployHeight *big.Int) error {
 		// Recover from accidentally skipped batches if necessary.
 		if s.verifier && s.backend == BackendL1 {
 			var newBatchIndex uint64
-			if rcfg.DeSeqBlock > 0 && *index+1 >= rcfg.DeSeqBlock {
+			if s.bc.Config().IsTxpoolEnabled(new(big.Int).SetUint64(*index + 1)) {
 				block, err := s.client.GetRawBlock(*index, s.backend)
 				if err != nil {
 					return fmt.Errorf("Cannot fetch block from dtl at index %d: %w", *index, err)
@@ -527,10 +540,8 @@ func (s *SyncService) Stop() error {
 	s.scope.Close()
 	s.txOtherScope.Close()
 	s.chainHeadSub.Unsubscribe()
-	close(s.chainHeadCh)
-	close(s.syncQueueFromOthers)
 	if s.cancel != nil {
-		defer s.cancel()
+		s.cancel()
 	}
 	return nil
 }
@@ -540,15 +551,24 @@ func (s *SyncService) HandleSyncFromOther() {
 		return
 	}
 
-	for block := range s.syncQueueFromOthers {
-		// unactive sequencers update local tx pool from active sequencer
-		if !s.verifier {
-			blockNumber := block.NumberU64()
-			for index, tx := range block.Transactions() {
-				log.Debug("Handle SyncFromOther ", "tx", tx.Hash(), "index", index, "block", blockNumber)
-				err := s.applyTransaction(tx, false)
-				if err != nil {
-					log.Error("HandleSyncFromOther applyTransaction ", "tx", tx.Hash(), "err", err)
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case block, ok := <-s.syncQueueFromOthers:
+			if !ok {
+				return
+			}
+
+			// unactive sequencers update local tx pool from active sequencer
+			if !s.verifier {
+				blockNumber := block.Number()
+				for index, tx := range block.Transactions() {
+					log.Debug("HandleSyncFromOther", "tx", tx.Hash(), "index", index, "block", blockNumber)
+					err := s.applyTransaction(tx, false)
+					if err != nil {
+						log.Error("HandleSyncFromOther applyTransaction ", "tx", tx.Hash(), "err", err)
+					}
 				}
 			}
 		}
@@ -560,11 +580,15 @@ func (s *SyncService) VerifierLoop() {
 	log.Info("Starting Verifier Loop", "poll-interval", s.pollInterval, "timestamp-refresh-threshold", s.timestampRefreshThreshold)
 	t := time.NewTicker(s.pollInterval)
 	defer t.Stop()
-	for ; true; <-t.C {
-		if err := s.verify(); err != nil {
-			log.Error("Could not verify", "error", err)
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-t.C:
+			if err := s.verify(); err != nil {
+				log.Error("Could not verify", "error", err)
+			}
 		}
-
 	}
 }
 
@@ -590,15 +614,20 @@ func (s *SyncService) SequencerLoop() {
 	log.Info("Starting Sequencer Loop", "poll-interval", s.pollInterval, "timestamp-refresh-threshold", s.timestampRefreshThreshold)
 	t := time.NewTicker(s.pollInterval)
 	defer t.Stop()
-	for ; true; <-t.C {
-		s.txLock.Lock()
-		if err := s.sequence(); err != nil {
-			log.Error("Could not sequence", "error", err)
-		}
-		s.txLock.Unlock()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-t.C:
+			s.txLock.Lock()
+			if err := s.sequence(); err != nil {
+				log.Error("Could not sequence", "error", err)
+			}
+			s.txLock.Unlock()
 
-		if err := s.updateL1BlockNumber(); err != nil {
-			log.Error("Could not update execution context", "error", err)
+			if err := s.updateL1BlockNumber(); err != nil {
+				log.Error("Could not update execution context", "error", err)
+			}
 		}
 	}
 }
@@ -663,7 +692,8 @@ func (s *SyncService) syncTransactionsToTip() error {
 		return s.syncTransactions(s.backend)
 	}
 	check := func() (*uint64, error) {
-		if rcfg.DeSeqBlock > 0 && s.bc.CurrentBlock().NumberU64()+1 >= rcfg.DeSeqBlock {
+		nextBN := new(big.Int).Add(big.NewInt(1), s.bc.CurrentBlock().Number())
+		if s.bc.Config().IsTxpoolEnabled(nextBN) {
 			return s.client.GetLatestBlockIndex(s.backend)
 		}
 		return s.client.GetLatestTransactionIndex(s.backend)
@@ -699,10 +729,7 @@ func (s *SyncService) waitingSequencerTip() (bool, error) {
 		log.Error("GetTxSequencer in waitingSequencerTip", "err", err)
 		return false, err
 	}
-	if !strings.EqualFold(expectSeq.String(), s.SeqAddress) {
-		return true, nil
-	}
-	return false, nil
+	return expectSeq != s.SeqAddress, nil
 }
 
 // updateL1GasPrice queries for the current L1 gas price and then stores it
@@ -1073,7 +1100,7 @@ func (s *SyncService) applyIndexedTransaction(tx *types.Transaction, fromLocal b
 		return s.applyTransactionToTip(tx, fromLocal)
 	}
 	// from p2p tx, when after DeSeqBlock, one block contains multiple transactions
-	if !fromLocal && *index+1 == next && rcfg.DeSeqBlock > 0 && *index+1 >= rcfg.DeSeqBlock {
+	if !fromLocal && *index+1 == next && s.bc.Config().IsTxpoolEnabled(new(big.Int).SetUint64(*index+1)) {
 		return s.applyTransactionToTip(tx, fromLocal)
 	}
 	if *index < next {
@@ -1105,9 +1132,9 @@ func (s *SyncService) applyHistoricalTransaction(tx *types.Transaction, fromLoca
 	// Handle the off by one
 	block := s.bc.GetBlockByNumber(*index + 1)
 	if block == nil {
-		return fmt.Errorf("Block %d is not found", *index+1, "fromLocal", fromLocal)
+		return fmt.Errorf("Block %d is not found, fromLocal: %t", *index+1, fromLocal)
 	}
-	if rcfg.DeSeqBlock > 0 && *index+1 >= rcfg.DeSeqBlock {
+	if s.bc.Config().IsTxpoolEnabled(new(big.Int).SetUint64(*index + 1)) {
 		return nil
 	}
 	txs := block.Transactions()
@@ -1122,7 +1149,7 @@ func (s *SyncService) applyHistoricalTransaction(tx *types.Transaction, fromLoca
 	return nil
 }
 
-func (s *SyncService) recoverSeqAddress(tx *types.Transaction) (string, error) {
+func (s *SyncService) recoverSeqAddress(tx *types.Transaction) (common.Address, error) {
 	return s.seqAdapter.RecoverSeqAddress(tx)
 }
 
@@ -1140,23 +1167,8 @@ func (s *SyncService) addSeqSignature(tx *types.Transaction) error {
 		tx.SetSeqSign(seqSign)
 		return nil
 	}
-	if s.seqPriv == "" || s.seqPriv == "0x" {
-		return errors.New("seq priv not set")
-	}
-	seqPriv := strings.Replace(s.seqPriv, "0x", "", 1)
-	hash := tx.Hash().Bytes()
 
-	privKey, err := hex.DecodeString(seqPriv)
-	if err != nil {
-		return err
-	}
-
-	ecdsaPri, err := crypto.ToECDSA(privKey)
-	if err != nil {
-		return err
-	}
-
-	signature, err := crypto.Sign(hash, ecdsaPri)
+	signature, err := crypto.Sign(tx.Hash().Bytes(), s.seqPriv)
 	if err != nil || len(signature) != 65 {
 		return errors.New("invalid signature")
 	}
@@ -1183,7 +1195,7 @@ func (s *SyncService) GetSeqAndMpcStatus() (bool, bool) {
 }
 
 func (s *SyncService) IsSelfSeqAddress(expectSeq common.Address) bool {
-	return strings.EqualFold(expectSeq.String(), s.SeqAddress)
+	return expectSeq == s.SeqAddress
 }
 
 func (s *SyncService) IsAboveStartHeight(num uint64) bool {
@@ -1195,7 +1207,7 @@ func (s *SyncService) makeOrVerifySequencerSign(tx *types.Transaction, blockNumb
 	seqModel, mpcEnabled := s.GetSeqAndMpcStatus()
 	var err error
 	isRespan := false
-	if seqModel && mpcEnabled && !strings.EqualFold(expectSeq.String(), s.SeqAddress) {
+	if seqModel && mpcEnabled && expectSeq != s.SeqAddress {
 		// mpc status 1. when in mpc sequencer model, enqueue or other rollup L1 tx is not acceptable
 		err = errors.New("current sequencer incorrect")
 		log.Error("applyTransactionToTip with sequencer set enabled", "err", err, "expectSeq", expectSeq.String(), "selfSeq", s.SeqAddress)
@@ -1238,7 +1250,7 @@ func (s *SyncService) makeOrVerifySequencerSign(tx *types.Transaction, blockNumb
 				log.Error("recoverSeqAddress err ", err)
 				return isRespan, err
 			}
-			if !strings.EqualFold(expectSeq.String(), recoverSeq) {
+			if expectSeq != recoverSeq {
 				errInfo := fmt.Sprintf("tx seq %v, is not expect seq %v", recoverSeq, expectSeq.String())
 				log.Error(errInfo)
 				return isRespan, errors.New(errInfo)
@@ -1379,7 +1391,7 @@ func (s *SyncService) applyTransactionToTip(tx *types.Transaction, fromLocal boo
 	if fromLocal {
 		currentBN = currentBN + 1
 	}
-	if rcfg.DeSeqBlock > 0 && currentBN >= rcfg.DeSeqBlock {
+	if s.bc.Config().IsTxpoolEnabled(new(big.Int).SetUint64(currentBN)) {
 		return s.applyTransactionToPool(tx, fromLocal)
 	}
 	// If there is no L1 timestamp assigned to the transaction, then assign a
@@ -1747,7 +1759,7 @@ type indexGetter func() (*uint64, error)
 func (s *SyncService) isAtTip(index *uint64, get indexGetter) (bool, error) {
 	latest, err := get()
 	if errors.Is(err, errElementNotFound) {
-    return true, nil
+		return true, nil
 	}
 	if err != nil {
 		return false, err
@@ -1862,7 +1874,8 @@ func (s *SyncService) syncBlockBatch(index uint64) error {
 func (s *SyncService) syncTransactionBatchRange(start, end uint64) error {
 	log.Info("Syncing transaction batch range", "start", start, "end", end)
 	for i := start; i <= end; i++ {
-		if rcfg.DeSeqBlock > 0 && s.bc.CurrentBlock().NumberU64()+1 >= rcfg.DeSeqBlock {
+		nextBN := new(big.Int).Add(big.NewInt(1), s.bc.CurrentBlock().Number())
+		if s.bc.Config().IsTxpoolEnabled(nextBN) {
 			err := s.syncBlockBatch(i)
 			if err != nil {
 				return fmt.Errorf("Cannot get block batch: %w", err)
@@ -1951,7 +1964,7 @@ func (s *SyncService) syncQueueTransactionRange(start, end uint64) error {
 	log.Info("Syncing enqueue transactions range", "start", start, "end", end)
 	for i := start; i <= end; i++ {
 		// NOTE, andromeda queue lost 20397
-		if rcfg.ChainID == 1088 && i == 20397 {
+		if s.bc.Config().IsMetisMainnet() && i == 20397 {
 			continue
 		}
 		tx, err := s.client.GetEnqueue(i)
@@ -2003,7 +2016,7 @@ func (s *SyncService) syncTransactionRange(start, end uint64, backend Backend) e
 	log.Info("Syncing transaction or block range", "start", start, "end", end, "backend", backend.String())
 	for i := start; i <= end; i++ {
 		// i + 1 equals the next block number
-		if rcfg.DeSeqBlock > 0 && i+1 >= rcfg.DeSeqBlock {
+		if s.bc.Config().IsTxpoolEnabled(new(big.Int).SetUint64(i + 1)) {
 			block, err := s.client.GetBlock(i, s.backend)
 			if err != nil {
 				return fmt.Errorf("cannot fetch block %d: %w", i, err)

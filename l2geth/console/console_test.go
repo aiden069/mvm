@@ -30,6 +30,7 @@ import (
 	"github.com/ethereum-optimism/optimism/l2geth/consensus/ethash"
 	"github.com/ethereum-optimism/optimism/l2geth/core"
 	"github.com/ethereum-optimism/optimism/l2geth/eth"
+	"github.com/ethereum-optimism/optimism/l2geth/ethclient"
 	"github.com/ethereum-optimism/optimism/l2geth/internal/jsre"
 	"github.com/ethereum-optimism/optimism/l2geth/miner"
 	"github.com/ethereum-optimism/optimism/l2geth/node"
@@ -110,7 +111,10 @@ func newTester(t *testing.T, confOverride func(*eth.Config)) *tester {
 	if confOverride != nil {
 		confOverride(ethConf)
 	}
-	if err = stack.Register(func(ctx *node.ServiceContext) (node.Service, error) { return eth.New(ctx, ethConf) }); err != nil {
+	if err = stack.Register(func(ctx *node.ServiceContext) (node.Service, error) {
+		rpc, _ := stack.Attach()
+		return eth.New(ctx, ethConf, ethclient.NewClient(rpc))
+	}); err != nil {
 		t.Fatalf("failed to register Ethereum protocol: %v", err)
 	}
 	// Start the node and assemble the JavaScript console around it

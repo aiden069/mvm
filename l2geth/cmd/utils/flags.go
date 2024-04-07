@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -45,6 +44,7 @@ import (
 	"github.com/ethereum-optimism/optimism/l2geth/eth"
 	"github.com/ethereum-optimism/optimism/l2geth/eth/downloader"
 	"github.com/ethereum-optimism/optimism/l2geth/eth/gasprice"
+	"github.com/ethereum-optimism/optimism/l2geth/ethclient"
 	"github.com/ethereum-optimism/optimism/l2geth/ethdb"
 	"github.com/ethereum-optimism/optimism/l2geth/ethstats"
 	"github.com/ethereum-optimism/optimism/l2geth/graphql"
@@ -933,6 +933,13 @@ var (
 		Value:  "",
 		EnvVar: "SEQ_BRIDGE_URL",
 	}
+
+	SeqTxPoolHeightFlag = cli.IntFlag{
+		Name:   "seqset.txpoolheight",
+		Usage:  "txpool valid block height",
+		Value:  9223372036854775807, // 2**63 - 1
+		EnvVar: "DESEQBLOCK",
+	}
 )
 
 // MakeDataDir retrieves the currently requested data directory, terminating
@@ -1174,9 +1181,8 @@ func setEth1(ctx *cli.Context, cfg *rollup.Config) {
 // UsingOVM
 // setRollup configures the rollup
 func setRollup(ctx *cli.Context, cfg *rollup.Config) {
-	if ctx.GlobalIsSet(RollupEnableVerifierFlag.Name) {
-		cfg.IsVerifier = true
-	}
+	cfg.IsVerifier = ctx.Bool(RollupEnableVerifierFlag.Name)
+
 	if ctx.GlobalIsSet(RollupMaxCalldataSizeFlag.Name) {
 		cfg.MaxCallDataSize = ctx.GlobalInt(RollupMaxCalldataSizeFlag.Name)
 	}
@@ -1219,18 +1225,17 @@ func setRollup(ctx *cli.Context, cfg *rollup.Config) {
 	if ctx.GlobalIsSet(PosClientHttpFlag.Name) {
 		cfg.PosClientHttp = ctx.GlobalString(PosClientHttpFlag.Name)
 	}
-	if ctx.GlobalIsSet(LocalL2ClientHttpFlag.Name) {
-		cfg.LocalL2ClientHttp = ctx.GlobalString(LocalL2ClientHttpFlag.Name)
-	} else {
-		cfg.LocalL2ClientHttp = "http://localhost:8545"
-	}
 	if ctx.GlobalIsSet(SeqsetContractFlag.Name) {
 		contractAddress := ctx.GlobalString(SeqsetContractFlag.Name)
-		cfg.SeqsetContract = common.HexToAddress(contractAddress)
+		params.MetisFallbackRollupConfig.SeqSetContract = common.HexToAddress(contractAddress)
 	}
 	if ctx.GlobalIsSet(SeqsetValidHeightFlag.Name) {
 		height := ctx.GlobalInt64(SeqsetValidHeightFlag.Name)
-		cfg.SeqsetValidHeight = uint64(height)
+		params.MetisFallbackRollupConfig.SeqSetHeight = big.NewInt(height)
+	}
+	if ctx.GlobalIsSet(SeqTxPoolHeightFlag.Name) {
+		height := ctx.GlobalInt64(SeqTxPoolHeightFlag.Name)
+		params.MetisFallbackRollupConfig.TxPoolHeight = big.NewInt(height)
 	}
 	if ctx.GlobalIsSet(SeqAddressFlag.Name) {
 		cfg.SeqAddress = ctx.GlobalString(SeqAddressFlag.Name)
@@ -1348,7 +1353,7 @@ func MakePasswordList(ctx *cli.Context) []string {
 	if path == "" {
 		return nil
 	}
-	text, err := ioutil.ReadFile(path)
+	text, err := os.ReadFile(path)
 	if err != nil {
 		Fatalf("Failed to read password file: %v", err)
 	}
@@ -1813,7 +1818,11 @@ func RegisterEthService(stack *node.Node, cfg *eth.Config) {
 		})
 	} else {
 		err = stack.Register(func(ctx *node.ServiceContext) (node.Service, error) {
-			fullNode, err := eth.New(ctx, cfg)
+			rpc, err := stack.Attach()
+			if err != nil {
+				return nil, err
+			}
+			fullNode, err := eth.New(ctx, cfg, ethclient.NewClient(rpc))
 			if fullNode != nil && cfg.LightServ > 0 {
 				ls, _ := les.NewLesServer(fullNode, cfg)
 				fullNode.AddLesServer(ls)

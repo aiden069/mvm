@@ -122,7 +122,7 @@ func (s *Ethereum) SetContractBackend(backend bind.ContractBackend) {
 
 // New creates a new Ethereum object (including the
 // initialisation of the common Ethereum object)
-func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
+func New(ctx *node.ServiceContext, config *Config, attached bind.ContractBackend) (*Ethereum, error) {
 	// Ensure configuration values are compatible and sane
 	if config.SyncMode == downloader.LightSync {
 		return nil, errors.New("can't run eth.Ethereum in light sync mode, use les.LightEthereum")
@@ -212,9 +212,10 @@ func New(ctx *node.ServiceContext, config *Config) (*Ethereum, error) {
 		config.TxPool.Journal = ctx.ResolvePath(config.TxPool.Journal)
 	}
 	eth.txPool = core.NewTxPool(config.TxPool, chainConfig, eth.blockchain)
-	// chan size 128 set to downloader.MaxBlockFetch
-	syncQueueFromOthers := make(chan *types.Block, 128)
-	eth.syncService, err = rollup.NewSyncService(context.Background(), config.Rollup, eth.txPool, eth.blockchain, eth.chainDb, syncQueueFromOthers)
+	// chan buffer size 128
+	syncQueueFromOthers := make(chan *types.Block, downloader.MaxBlockFetch)
+	eth.syncService, err = rollup.NewSyncService(context.Background(),
+		config.Rollup, eth.txPool, eth.blockchain, eth.chainDb, attached, syncQueueFromOthers)
 	if err != nil {
 		return nil, fmt.Errorf("Cannot initialize syncservice: %w", err)
 	}

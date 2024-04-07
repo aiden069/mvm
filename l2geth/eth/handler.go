@@ -113,13 +113,15 @@ type ProtocolManager struct {
 	gasInitialized                 bool
 	signer                         types.Signer
 
-	txQueues    chan *types.Block
-	syncService *rollup.SyncService
+	txQueues      chan<- *types.Block
+	syncService   *rollup.SyncService
+	txQueueCloser sync.Once
 }
 
 // NewProtocolManager returns a new Ethereum sub protocol manager. The Ethereum sub protocol manages peers capable
 // with the Ethereum network.
-func NewProtocolManager(config *params.ChainConfig, checkpoint *params.TrustedCheckpoint, mode downloader.SyncMode, networkID uint64, mux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain *core.BlockChain, chaindb ethdb.Database, cacheLimit int, whitelist map[uint64]common.Hash, nodeHTTPModules []string, txQueues chan *types.Block, syncService *rollup.SyncService) (*ProtocolManager, error) {
+func NewProtocolManager(config *params.ChainConfig, checkpoint *params.TrustedCheckpoint, mode downloader.SyncMode, networkID uint64, mux *event.TypeMux, txpool txPool,
+	engine consensus.Engine, blockchain *core.BlockChain, chaindb ethdb.Database, cacheLimit int, whitelist map[uint64]common.Hash, nodeHTTPModules []string, txQueues chan<- *types.Block, syncService *rollup.SyncService) (*ProtocolManager, error) {
 	// Create the protocol manager with the base fields
 	manager := &ProtocolManager{
 		networkID:                      networkID,
@@ -176,85 +178,42 @@ func NewProtocolManager(config *params.ChainConfig, checkpoint *params.TrustedCh
 		stateBloom = trie.NewSyncBloom(uint64(cacheLimit), chaindb)
 	}
 
+	if syncService == nil {
+		return nil, fmt.Errorf("Null sync serice")
+	}
 	manager.syncService = syncService
 
 	blocksBeforeInsert := func(blocks types.Blocks) error {
-		if manager.syncService == nil {
-			return nil
-		}
-		seqAdapter := manager.syncService.RollupAdapter()
-		if seqAdapter == nil || rcfg.SeqValidHeight == 0 {
-			return nil
-		}
-		var (
-			block *types.Block
-		)
 		rollupClient := manager.syncService.RollupClient()
-		// syncEnqueueIndex := manager.syncService.GetLatestEnqueueIndex()
-		// var latestEnqueueIndex uint64
-		// if syncEnqueueIndex != nil {
-		// 	latestEnqueueIndex = *syncEnqueueIndex
-		// }
-		for i := 0; i < len(blocks); i++ {
-			block = blocks[i]
+		for _, block := range blocks {
+			blockNumber := block.Number()
+
 			if block.Transactions().Len() == 0 {
-				continue
+				return fmt.Errorf("invalid block %d: no transaction", blockNumber)
 			}
-			blockNumber := block.NumberU64()
-			if seqAdapter.GetSeqValidHeight() > 0 && blockNumber >= seqAdapter.GetSeqValidHeight() {
-				tx := block.Transactions()[0]
+
+			for _, tx := range block.Transactions() {
 				// enqueue tx should not verify sequencer sign
 				if tx.QueueOrigin() == types.QueueOriginL1ToL2 {
 					// check enquene index
 					queueIndex := tx.GetMeta().QueueIndex
 					if queueIndex == nil {
-						return errors.New("handler blocksBeforeInsert invalid queue")
+						return errors.New("handler blocksBeforeInsert: invalid queue index")
 					}
-					// Not check this index, always get known blocks
-					// if syncEnqueueIndex != nil && *queueIndex <= latestEnqueueIndex {
-					// 	// queueIndex should >= 0
-					// 	errInfo := fmt.Sprintf("handler blocksBeforeInsert queue index replay, latest enqueue index %v, queue index %v", latestEnqueueIndex, *queueIndex)
-					// 	log.Error(errInfo)
-					// 	return errors.New(errInfo)
-					// }
-					// syncEnqueueIndex = queueIndex
-					// latestEnqueueIndex = *queueIndex
 					// check args with dtl l1 enqueue
 					txEnqueue, err := rollupClient.GetEnqueue(*queueIndex)
 					if err != nil {
-						log.Error("handler blocksBeforeInsert get equeue", "err", err)
-						return err
+						return fmt.Errorf("handle blocksBeforeInsert: get equeue: %w", err)
 					}
 					if txEnqueue.Hash() != tx.Hash() {
-						errInfo := fmt.Sprintf("handler blocksBeforeInsert incorrect queue, incoming hash %v, queue hash %v", tx.Hash().Hex(), txEnqueue.Hash().Hex())
-						log.Error(errInfo)
-						return errors.New(errInfo)
+						return fmt.Errorf("handle blocksBeforeInsert: incorrect queue, incoming hash %v, queue hash %v", tx.Hash().Hex(), txEnqueue.Hash().Hex())
 					}
-					continue
-				}
-				signature := tx.GetSeqSign()
-				if signature == nil {
-					errInfo := "handler blocksBeforeInsert with nil tx signature"
-					log.Error(errInfo)
-					return errors.New(errInfo)
-				}
-				recoverSeq, err := seqAdapter.RecoverSeqAddress(tx)
-				if err != nil {
-					log.Error("handler blocksBeforeInsert RecoverSeqAddress err", err)
-					return err
-				}
-				log.Debug(fmt.Sprintf("handler blocksBeforeInsert tx seq %v", recoverSeq), "number", blockNumber)
-				// check prevent sequencer signer and height of PoS
-				shouldPrevent := seqAdapter.IsPreRespanSequencer(recoverSeq, blockNumber)
-				if shouldPrevent {
-					errInfo := "handler blocksBeforeInsert with prevent by respan"
-					log.Error(errInfo, "recoverSeq", recoverSeq, "number", blockNumber)
-					return errors.New(errInfo)
 				}
 			}
 		}
 		return nil
 	}
+
 	// downloader blocks inserted hook
 	blocksInsertedDownloader := func(blocks types.Blocks) {
 		// update txQueue
@@ -361,33 +320,7 @@ func (pm *ProtocolManager) removePeer(id string) {
 		log.Error("Peer removal failed", "peer", id, "err", err)
 	}
 	// Hard disconnect at the networking layer
-	if peer != nil {
-		peer.Peer.Disconnect(p2p.DiscUselessPeer)
-	}
-}
-
-// start a ticker to resolve peer block writter abort by future blocks
-func (pm *ProtocolManager) startFetcherTicker() {
-	// NOTE 20210724
-	pm.tickerFetcherSync = time.NewTicker(5 * time.Second)
-	for {
-		select {
-		case <-pm.tickerFetcherSync.C:
-			ts := time.Now().Unix()
-			if rcfg.PeerHealthCheckSeconds > 0 && pm.peerSyncTime > 0 && ts-pm.peerSyncTime > rcfg.PeerHealthCheckSeconds {
-				// restart peer connection
-				log.Info("Need reconnect peers", "seconds", ts-pm.peerSyncTime, "peers len", pm.peers.Len())
-
-				peerList := pm.peers.peers
-				for _, p := range peerList {
-					pm.removePeer(p.id)
-					pm.handle(p)
-				}
-				pm.peerSyncTime = time.Now().Unix()
-				log.Info("All peers reconnecting", "peers len", pm.peers.Len())
-			}
-		}
-	}
+	peer.Peer.Disconnect(p2p.DiscUselessPeer)
 }
 
 func (pm *ProtocolManager) Start(maxPeers int) {
@@ -405,8 +338,6 @@ func (pm *ProtocolManager) Start(maxPeers int) {
 	// start sync handlers
 	go pm.syncer()
 	go pm.txsyncLoop()
-
-	go pm.startFetcherTicker()
 }
 
 func (pm *ProtocolManager) Stop() {
@@ -1162,17 +1093,13 @@ func (pm *ProtocolManager) updateGasPrice(blocks types.Blocks) {
 func (pm *ProtocolManager) updateTxQueue(blocks types.Blocks) {
 	log.Info("handle blocks inerted of fetcher or downloader", "len", len(blocks))
 	for _, block := range blocks {
-		pm.txQueues <- block
-		// for _, tx := range block.Transactions() {
-		// 	index := tx.GetMeta().Index
-		// 	if index == nil {
-		// 		log.Info("handle blocks inerted of fetcher or downloader, nil index")
-		// 		continue
-		// 	}
-		// 	log.Info("handle blocks inerted of fetcher or downloader", "tx index", *index)
-		// 	if pm.txQueues != nil {
-		// 		pm.txQueues <- tx
-		// 	}
-		// }
+		select {
+		case <-pm.quitSync:
+			pm.txQueueCloser.Do(func() {
+				close(pm.txQueues)
+			})
+			return
+		case pm.txQueues <- block:
+		}
 	}
 }

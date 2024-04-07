@@ -4,19 +4,12 @@ import (
 	"fmt"
 	"math/big"
 	"os"
-	"strconv"
 
 	"github.com/ethereum-optimism/optimism/l2geth/common"
 )
 
 // UsingOVM is used to enable or disable functionality necessary for the OVM.
-var (
-	UsingOVM               bool
-	PeerHealthCheckSeconds int64
-	ChainID                uint64
-	DeSeqBlock             uint64
-	SeqValidHeight         uint64
-)
+var UsingOVM bool
 
 var (
 	// l2GasPriceSlot refers to the storage slot that the L2 gas price is stored
@@ -49,56 +42,11 @@ var (
 func init() {
 	UsingOVM = os.Getenv("USING_OVM") == "true"
 
-	deseqHeight := os.Getenv("DESEQBLOCK")
-	if deseqHeight == "" {
-		DeSeqBlock = ^uint64(0)
-	} else {
-		parsed, err := strconv.ParseUint(deseqHeight, 0, 64)
-		if err != nil {
-			panic(err)
-		}
-		DeSeqBlock = parsed
-	}
-
-	peerHealthCheck := os.Getenv("PEER_HEALTH_CHECK")
-	if peerHealthCheck == "" {
-		PeerHealthCheckSeconds = ^int64(0)
-	} else {
-		parsed, err := strconv.ParseInt(peerHealthCheck, 10, 64)
-		if err != nil {
-			panic(err)
-		}
-		PeerHealthCheckSeconds = parsed
-	}
-
-	envChainID := os.Getenv("CHAIN_ID")
-	if envChainID == "" {
-		ChainID = ^uint64(0)
-	} else {
-		parsed, err := strconv.ParseUint(envChainID, 0, 64)
-		if err != nil {
-			panic(err)
-		}
-		ChainID = parsed
-	}
-
-	envSvh := os.Getenv("SEQSET_VALID_HEIGHT")
-	if envSvh == "" {
-		SeqValidHeight = ^uint64(0)
-	} else {
-		parsed, err := strconv.ParseUint(envSvh, 0, 64)
-		if err != nil {
-			panic(err)
-		}
-		SeqValidHeight = parsed
-	}
-
 	// for testing
 	if defSeqAddr := os.Getenv("SEQSET_FIRST_SEQUENCER"); defSeqAddr != "" {
 		if addr := common.HexToAddress(defSeqAddr); !addr.IsZero() {
 			DefaultSeqAdderss = addr
+			fmt.Println("Update default SeqAdderss", DefaultSeqAdderss.Hex())
 		}
 	}
-
-	fmt.Println("rcfg UsingOVM ", UsingOVM, " envChainID ", envChainID, "envSeqValidHeight", envSvh, "defaultSeqAdderss", DefaultSeqAdderss.Hex())
 }

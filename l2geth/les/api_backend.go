@@ -364,12 +364,6 @@ func (b *LesApiBackend) IsSequencerWorking() bool {
 	log.Info("LesApiBackend IsSequencerWorking")
 	return true
 }
-func (b *LesApiBackend) AddSequencerInfo(ctx context.Context, seq *types.SequencerInfo) error {
-	return nil
-}
-func (b *LesApiBackend) ListSequencerInfo(ctx context.Context) *types.SequencerInfoList {
-	return nil
-}
 
 func (b *LesApiBackend) SetPreRespan(ctx context.Context, oldAddress common.Address, newAddress common.Address, number uint64) error {
 	return nil

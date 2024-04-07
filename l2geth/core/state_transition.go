@@ -278,31 +278,31 @@ func (st *StateTransition) TransitionDbWithBlockNumber(blockNumber uint64) (ret 
 
 	// take the l1fee from the gas pool first. it is important to show user the actual cost when estimate
 	// it is also important to take it out before the vm call so that the state wont be changed
-		vmerr = st.useGas(st.l1FeeInL2)
+	vmerr = st.useGas(st.l1FeeInL2)
 
-		if vmerr != nil {
+	if vmerr != nil {
+		// Increment the nonce for the next transaction
+		st.state.SetNonce(msg.From(), st.state.GetNonce(msg.From())+1)
+		evm.BuyL1FeeFailTracer(msg.From(), st.to(), st.data, st.gas, st.l1FeeInL2, msg.Value(), vmerr)
+		log.Debug("run out of gas when taking l1fee", "err", vmerr, "gasleft", st.gas, "sender", msg.From())
+	} else if msg.Value().Sign() > 0 && !msg.CheckNonce() && msg.From() == (common.Address{}) {
+		vmerr = st.useGas(params.Sha256PerWordGas) // this is the gas we skipped
+		// no need to advance nonce here because checknonce is false
+		log.Debug("zero address with value called. skipping vm execution")
+	} else {
+		// NOTE: andromeda peer & replica
+		if st.evm.ChainConfig().IsMetisMainnet() && (blockNumber == 3247675 || blockNumber == 3247681) {
+			_ = st.useGas(100000)
+		}
+		// log.Debug("getting in vm", "gas", st.gas, "value", st.value, "sender", msg.From(), "gasprice", st.gasPrice)
+		if contractCreation {
+			ret, _, st.gas, vmerr = evm.Create(sender, st.data, st.gas, st.value)
+		} else {
 			// Increment the nonce for the next transaction
 			st.state.SetNonce(msg.From(), st.state.GetNonce(msg.From())+1)
-			evm.BuyL1FeeFailTracer(msg.From(), st.to(), st.data, st.gas, st.l1FeeInL2, msg.Value(), vmerr)
-			log.Debug("run out of gas when taking l1fee", "err", vmerr, "gasleft", st.gas, "sender", msg.From())
-		} else if msg.Value().Sign() > 0 && !msg.CheckNonce() && msg.From() == (common.Address{}) {
-			vmerr = st.useGas(params.Sha256PerWordGas) // this is the gas we skipped
-			// no need to advance nonce here because checknonce is false
-			log.Debug("zero address with value called. skipping vm execution")
-		} else {
-			// NOTE: andromeda peer & replica
-			if rcfg.ChainID == 1088 && (blockNumber == 3247675 || blockNumber == 3247681) {
-				_ = st.useGas(100000)
-			}
-			// log.Debug("getting in vm", "gas", st.gas, "value", st.value, "sender", msg.From(), "gasprice", st.gasPrice)
-			if contractCreation {
-				ret, _, st.gas, vmerr = evm.Create(sender, st.data, st.gas, st.value)
-			} else {
-				// Increment the nonce for the next transaction
-				st.state.SetNonce(msg.From(), st.state.GetNonce(msg.From())+1)
-				ret, st.gas, vmerr = evm.Call(sender, st.to(), st.data, st.gas, st.value)
-			}
+			ret, st.gas, vmerr = evm.Call(sender, st.to(), st.data, st.gas, st.value)
 		}
+	}
 
 	if vmerr != nil {
 		log.Debug("VM returned with error", "err", vmerr, "ret", hexutil.Encode(ret))
@@ -316,7 +316,7 @@ func (st *StateTransition) TransitionDbWithBlockNumber(blockNumber uint64) (ret 
 
 	st.refundGas()
 
-  st.state.AddBalance(evm.Coinbase, new(big.Int).Mul(new(big.Int).SetUint64(st.gasUsed()), st.gasPrice))
+	st.state.AddBalance(evm.Coinbase, new(big.Int).Mul(new(big.Int).SetUint64(st.gasUsed()), st.gasPrice))
 	return ret, st.gasUsed(), vmerr != nil, err
 }
 

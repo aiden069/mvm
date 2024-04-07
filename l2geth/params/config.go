@@ -239,6 +239,20 @@ var (
 
 	// MetisSepoliaRFDUpdateForkNum is the height at which the refund(RFD) update fork activates on Goerli.
 	MetisSepoliaRFDUpdateForkNum = big.NewInt(600000)
+
+	MetisMainnetRollupConfig = &MVMRollupConfig{
+		SeqSetContract: common.HexToAddress("0x0fe382b74C3894B65c10E5C12ae60Bbd8FAf5b48"),
+		SeqSetHeight:   big.NewInt(15214531),
+		TxPoolHeight:   nil,
+	}
+
+	MetisSepoliaRollupConfig = &MVMRollupConfig{
+		SeqSetContract: common.HexToAddress("0xdE8d56212118906a0CeCD331e842429714b4c47B"),
+		SeqSetHeight:   big.NewInt(1000),
+		TxPoolHeight:   big.NewInt(600000),
+	}
+
+	MetisFallbackRollupConfig = &MVMRollupConfig{}
 )
 
 // TrustedCheckpoint represents a set of post-processed trie roots (CHT and
@@ -281,6 +295,12 @@ type CheckpointOracleConfig struct {
 	Address   common.Address   `json:"address"`
 	Signers   []common.Address `json:"signers"`
 	Threshold uint64           `json:"threshold"`
+}
+
+type MVMRollupConfig struct {
+	SeqSetContract common.Address `json:"seqset_contract"`
+	SeqSetHeight   *big.Int       `json:"seqset_height,omitempty"`
+	TxPoolHeight   *big.Int       `json:"txpool_height,omitempty"`
 }
 
 // ChainConfig is the core config which determines the blockchain settings.
@@ -444,6 +464,50 @@ func (c *ChainConfig) IsRFDUpdate(num *big.Int) bool {
 		return isForked(MetisSepoliaRFDUpdateForkNum, num)
 	}
 	return true
+}
+
+func (c *ChainConfig) MetisRollupConfig() *MVMRollupConfig {
+	if c.ChainID.Cmp(MetisMainnetChainID) == 0 {
+		return MetisMainnetRollupConfig
+	}
+	if c.ChainID.Cmp(MetisSepoliaChainID) == 0 {
+		return MetisSepoliaRollupConfig
+	}
+	return MetisFallbackRollupConfig
+}
+
+func (c *ChainConfig) MetisSeqSetContract() common.Address {
+	if c.ChainID.Cmp(MetisMainnetChainID) == 0 {
+		return MetisMainnetRollupConfig.SeqSetContract
+	}
+	if c.ChainID.Cmp(MetisSepoliaChainID) == 0 {
+		return MetisSepoliaRollupConfig.SeqSetContract
+	}
+	return MetisFallbackRollupConfig.SeqSetContract
+}
+
+func (c *ChainConfig) IsTxpoolEnabled(num *big.Int) bool {
+	if c.ChainID.Cmp(MetisMainnetChainID) == 0 {
+		return isForked(MetisMainnetRollupConfig.TxPoolHeight, num)
+	}
+	if c.ChainID.Cmp(MetisSepoliaChainID) == 0 {
+		return isForked(MetisSepoliaRollupConfig.TxPoolHeight, num)
+	}
+	return isForked(MetisFallbackRollupConfig.TxPoolHeight, num)
+}
+
+func (c *ChainConfig) IsSeqSetEnabled(num *big.Int) bool {
+	if c.ChainID.Cmp(MetisMainnetChainID) == 0 {
+		return isForked(MetisMainnetRollupConfig.SeqSetHeight, num)
+	}
+	if c.ChainID.Cmp(MetisSepoliaChainID) == 0 {
+		return isForked(MetisSepoliaRollupConfig.SeqSetHeight, num)
+	}
+	return isForked(MetisFallbackRollupConfig.SeqSetHeight, num)
+}
+
+func (c *ChainConfig) IsMetisMainnet() bool {
+	return c.ChainID.Cmp(MetisMainnetChainID) == 0
 }
 
 // CheckCompatible checks whether scheduled fork transitions have been imported

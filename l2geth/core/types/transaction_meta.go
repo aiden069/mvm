@@ -13,7 +13,6 @@ import (
 
 	"github.com/ethereum-optimism/optimism/l2geth/common"
 	"github.com/ethereum-optimism/optimism/l2geth/rlp"
-	"github.com/ethereum-optimism/optimism/l2geth/rollup/rcfg"
 )
 
 type QueueOrigin uint8
@@ -223,7 +222,7 @@ func TxMetaDecode(input []byte) (*TransactionMeta, error) {
 		meta.RawTransaction = raw
 	}
 
-	if rcfg.SeqValidHeight > 0 && *meta.Index+1 >= rcfg.SeqValidHeight {
+	if b.Len() > 0 {
 		// sequencer sign after mpc enabled height
 		r, err := common.ReadVarBytes(b, 0, 1024, "R")
 		if err != nil {
@@ -312,34 +311,32 @@ func TxMetaEncode(meta *TransactionMeta) []byte {
 		common.WriteVarBytes(b, 0, rawTransaction)
 	}
 
-	if rcfg.SeqValidHeight > 0 && *meta.Index+1 >= rcfg.SeqValidHeight {
-		// sequencer sign after mpc enabled height
-		rSeq := meta.R
-		if rSeq == nil {
-			common.WriteVarBytes(b, 0, getNullValue())
-		} else {
-			r := new(bytes.Buffer)
-			binary.Write(r, binary.LittleEndian, rSeq.Bytes())
-			common.WriteVarBytes(b, 0, r.Bytes())
-		}
+	// sequencer sign after mpc enabled height
+	rSeq := meta.R
+	if rSeq == nil {
+		common.WriteVarBytes(b, 0, getNullValue())
+	} else {
+		r := new(bytes.Buffer)
+		binary.Write(r, binary.LittleEndian, rSeq.Bytes())
+		common.WriteVarBytes(b, 0, r.Bytes())
+	}
 
-		sSeq := meta.S
-		if sSeq == nil {
-			common.WriteVarBytes(b, 0, getNullValue())
-		} else {
-			s := new(bytes.Buffer)
-			binary.Write(s, binary.LittleEndian, sSeq.Bytes())
-			common.WriteVarBytes(b, 0, s.Bytes())
-		}
+	sSeq := meta.S
+	if sSeq == nil {
+		common.WriteVarBytes(b, 0, getNullValue())
+	} else {
+		s := new(bytes.Buffer)
+		binary.Write(s, binary.LittleEndian, sSeq.Bytes())
+		common.WriteVarBytes(b, 0, s.Bytes())
+	}
 
-		vSeq := meta.V
-		if vSeq == nil {
-			common.WriteVarBytes(b, 0, getNullValue())
-		} else {
-			v := new(bytes.Buffer)
-			binary.Write(v, binary.LittleEndian, vSeq.Bytes())
-			common.WriteVarBytes(b, 0, v.Bytes())
-		}
+	vSeq := meta.V
+	if vSeq == nil {
+		common.WriteVarBytes(b, 0, getNullValue())
+	} else {
+		v := new(bytes.Buffer)
+		binary.Write(v, binary.LittleEndian, vSeq.Bytes())
+		common.WriteVarBytes(b, 0, v.Bytes())
 	}
 
 	return b.Bytes()

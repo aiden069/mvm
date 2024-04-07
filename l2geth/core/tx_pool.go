@@ -555,7 +555,7 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 	}
 	// Ensure the transaction adheres to nonce ordering
 	if rcfg.UsingOVM {
-		if rcfg.DeSeqBlock > 0 && pool.chain.CurrentBlock().NumberU64()+1 >= rcfg.DeSeqBlock {
+		if pool.chainconfig.IsTxpoolEnabled(new(big.Int).Add(big.NewInt(1), pool.chain.CurrentBlock().Number())) {
 			if pool.currentState.GetNonce(from) > tx.Nonce() {
 				return ErrNonceTooLow
 			}

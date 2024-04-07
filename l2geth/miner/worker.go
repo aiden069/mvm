@@ -111,7 +111,7 @@ type environment struct {
 	txs      []*types.Transaction
 	receipts []*types.Receipt
 
-  l1BN uint64 // make sure L1BlockNumber set once per block by TxPool
+	l1BN uint64 // make sure L1BlockNumber set once per block by TxPool
 }
 
 // task contains all information for consensus engine sealing and result submitting.
@@ -395,7 +395,7 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 		case <-timer.C:
 			resubmit := w.chainConfig.Clique == nil || w.chainConfig.Clique.Period > 0
 			nextBN := w.chain.CurrentBlock().NumberU64() + 1
-			if rcfg.DeSeqBlock > 0 && nextBN >= rcfg.DeSeqBlock {
+			if w.chainConfig.IsTxpoolEnabled(new(big.Int).SetUint64(nextBN)) {
 				resubmit = true
 			}
 			if !resubmit {
@@ -556,7 +556,8 @@ func (w *worker) mainLoop() {
 				continue
 			}
 			var err error
-			if rcfg.DeSeqBlock > 0 && w.chain.CurrentBlock().NumberU64()+1 >= rcfg.DeSeqBlock && (ev.Time > 0 || len(ev.Txs) > 1) {
+			nextBN := new(big.Int).Add(w.chain.CurrentBlock().Number(), big.NewInt(1))
+			if w.chainConfig.IsTxpoolEnabled(nextBN) && (ev.Time > 0 || len(ev.Txs) > 1) {
 				log.Debug("Attempting to commit rollup transactions", "hash0", ev.Txs[0].Hash().Hex())
 				err = w.commitNewTxDeSeq(ev.Txs, ev.Time)
 			} else {
@@ -612,10 +613,8 @@ func (w *worker) mainLoop() {
 			} else {
 				// If clique is running in dev mode(period is 0), disable
 				// advance sealing here.
-				deSeqModel := false
-				if rcfg.DeSeqBlock > 0 && w.chain.CurrentBlock().NumberU64()+1 >= rcfg.DeSeqBlock {
-					deSeqModel = true
-				}
+				nextBN := new(big.Int).Add(w.chain.CurrentBlock().Number(), big.NewInt(1))
+				deSeqModel := w.chainConfig.IsTxpoolEnabled(nextBN)
 				log.Debug("Special info in worker", "working else", true, "deSeqMode", deSeqModel, "cmp to DeSeqBlock", w.chain.CurrentBlock().NumberU64()+1)
 				if w.chainConfig.Clique != nil && w.chainConfig.Clique.Period == 0 && !deSeqModel {
 					w.commitNewWork(nil, time.Now().Unix())
@@ -800,7 +799,7 @@ func (w *worker) makeCurrent(parent *types.Block, header *types.Header) error {
 		family:    mapset.NewSet(),
 		uncles:    mapset.NewSet(),
 		header:    header,
-    l1BN:      uint64(0),
+		l1BN:      uint64(0),
 	}
 
 	// when 08 is processed ancestors contain 07 (quick block)
@@ -875,7 +874,7 @@ func (w *worker) commitTransaction(tx *types.Transaction, coinbase common.Addres
 	if w.current != nil && len(w.current.txs) > 0 {
 		// after DeSeqBlock, allow multiple tx in a pool, header number with new block
 		log.Debug("Special info in worker: commitTransaction", "cmp to DeSeqBlock", w.current.header.Number.Uint64())
-		if rcfg.UsingOVM && !(rcfg.DeSeqBlock > 0 && w.current.header.Number.Uint64() >= rcfg.DeSeqBlock) {
+		if rcfg.UsingOVM && !w.chainConfig.IsTxpoolEnabled(w.current.header.Number) {
 			return nil, core.ErrGasLimitReached
 		}
 	}
@@ -913,11 +912,8 @@ func (w *worker) commitTransactionsWithError(txs *types.TransactionsByPriceAndNo
 
 	parent := w.chain.CurrentBlock()
 	pn := parent.Number().Uint64()
-	deSeqModel := false
+	deSeqModel := w.chainConfig.IsTxpoolEnabled(new(big.Int).SetUint64(pn + 1))
 	log.Debug("Special info in worker: commitTransactionsWithError", "cmp to DeSeqBlock", pn+1)
-	if rcfg.DeSeqBlock > 0 && pn+1 >= rcfg.DeSeqBlock {
-		deSeqModel = true
-	}
 
 	for {
 		// In the following three cases, we will interrupt the execution of the transaction.
@@ -957,12 +953,12 @@ func (w *worker) commitTransactionsWithError(txs *types.TransactionsByPriceAndNo
 
 		// setIndex, l1Timestamp, l1BlockNumber
 		if deSeqModel {
-      if w.current.l1BN == 0 {
-        w.current.l1BN = tx.L1BlockNumber().Uint64()
-      }
-      tx.SetL1BlockNumber(w.current.l1BN)
-      tx.SetL1Timestamp(w.current.header.Time)
-      tx.SetIndex(pn)
+			if w.current.l1BN == 0 {
+				w.current.l1BN = tx.L1BlockNumber().Uint64()
+			}
+			tx.SetL1BlockNumber(w.current.l1BN)
+			tx.SetL1Timestamp(w.current.header.Time)
+			tx.SetIndex(pn)
 		}
 
 		// Error may be ignored here. The error has already been checked
@@ -1296,14 +1292,11 @@ func (w *worker) commit(uncles []*types.Header, interval func(), start time.Time
 
 	// Make sure txs.L1Timestamp set to block
 	pn := w.current.header.Number.Uint64() - 1
-	deSeqModel := false
+	deSeqModel := w.chainConfig.IsTxpoolEnabled(new(big.Int).SetUint64(pn + 1))
 	blockTime := w.current.header.Time
 	log.Debug("Special info in worker: commit", "cmp to DeSeqBlock", pn+1)
-	if rcfg.DeSeqBlock > 0 && pn+1 >= rcfg.DeSeqBlock {
-		deSeqModel = true
-	}
 
-  // Note, cannot modify any tx info in the method, because TX apply to EVM before, block.time will be effected
+	// Note, cannot modify any tx info in the method, because TX apply to EVM before, block.time will be effected
 
 	s := w.current.state.Copy()
 	block, err := w.engine.FinalizeAndAssemble(w.chain, w.current.header, s, w.current.txs, uncles, w.current.receipts)
@@ -1317,7 +1310,7 @@ func (w *worker) commit(uncles []*types.Header, interval func(), start time.Time
 	txs := block.Transactions()
 	// New block, DeSeqBlock compare not plus 1
 	log.Debug("Special info in worker: commit", "cmp to DeSeqBlock", w.current.header.Number.Uint64())
-	if rcfg.UsingOVM && !(rcfg.DeSeqBlock > 0 && w.current.header.Number.Uint64() >= rcfg.DeSeqBlock) {
+	if rcfg.UsingOVM && !w.chainConfig.IsTxpoolEnabled(w.current.header.Number) {
 		if len(txs) != 1 {
 			return fmt.Errorf("Block created with %d transactions rather than 1 at %d", len(txs), block.NumberU64())
 		}

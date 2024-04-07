@@ -905,7 +905,7 @@ func DoCall(ctx context.Context, b Backend, args CallArgs, blockNrOrHash rpc.Blo
 		if block != nil {
 			txs := block.Transactions()
 			if header.Number.Uint64() != 0 {
-				if (rcfg.DeSeqBlock == 0 || header.Number.Uint64() < rcfg.DeSeqBlock) && len(txs) != 1 {
+				if !b.ChainConfig().IsTxpoolEnabled(header.Number) && len(txs) != 1 {
 					return nil, 0, false, fmt.Errorf("block %d has more than 1 transaction", header.Number.Uint64())
 				}
 				tx := txs[0]
@@ -2092,18 +2092,6 @@ func (api *PublicRollupAPI) GasPrices(ctx context.Context) (*gasPrices, error) {
 	}, nil
 }
 
-func (api *PublicRollupAPI) CheckIsSeqWorking() bool {
-	return api.b.IsSequencerWorking()
-}
-
-func (api *PublicRollupAPI) AddSequencerInfo(ctx context.Context, seq *types.SequencerInfo) error {
-	return api.b.AddSequencerInfo(ctx, seq)
-}
-
-func (api *PublicRollupAPI) ListSequencerInfo(ctx context.Context) *types.SequencerInfoList {
-	return api.b.ListSequencerInfo(ctx)
-}
-
 // PrivatelRollupAPI provides private RPC methods to control the sequencer.
 // These methods can be abused by external users and must be considered insecure for use by untrusted users.
 type PrivateRollupAPI struct {
@@ -2138,7 +2126,7 @@ func NewBridgeRollupAPI(b Backend) *BridgeRollupAPI {
 }
 
 func (api *BridgeRollupAPI) SetPreRespan(ctx context.Context, oldAddress common.Address, newAddress common.Address, number uint64) error {
-	return api.b.SetPreRespan(ctx, oldAddress, newAddress, number)
+	return nil
 }
 
 type PublicMvmAPI struct {

@@ -20,11 +20,6 @@ type Config struct {
 	RollupClientHttp string
 	// Pos HTTP endpoint for pos layer
 	PosClientHttp string
-	// SeqsetContract
-	SeqsetContract common.Address
-	// Seqset valid height
-	SeqsetValidHeight uint64
-	LocalL2ClientHttp string
 	// Owner of the GasPriceOracle contract
 	GasPriceOracleOwnerAddress common.Address
 	// Turns on checking of state for L2 gas price

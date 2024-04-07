@@ -21,8 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"strings"
-	"sync"
 	"time"
 
 	"github.com/ethereum-optimism/optimism/l2geth/accounts"
@@ -36,7 +34,6 @@ import (
 	"github.com/ethereum-optimism/optimism/l2geth/core/vm"
 	"github.com/ethereum-optimism/optimism/l2geth/eth/downloader"
 	"github.com/ethereum-optimism/optimism/l2geth/eth/gasprice"
-	"github.com/ethereum-optimism/optimism/l2geth/ethclient"
 	"github.com/ethereum-optimism/optimism/l2geth/ethdb"
 	"github.com/ethereum-optimism/optimism/l2geth/event"
 	"github.com/ethereum-optimism/optimism/l2geth/log"
@@ -55,10 +52,6 @@ type EthAPIBackend struct {
 	gasLimit        uint64
 	UsingOVM        bool
 	MaxCallDataSize int
-	seqInfos        map[common.Address]string
-	seqRwMutex      sync.RWMutex
-	seqRpcClient    *ethclient.Client
-	seqRpcUrl       string
 }
 
 func NewEthAPIBackend(extRPCEnabled bool, eth *Ethereum, gpo *gasprice.Oracle, rollupGpo *gasprice.RollupOracle, verifier bool, gasLimit uint64, UsingOVM bool, MaxCallDataSize int) *EthAPIBackend {
@@ -71,7 +64,6 @@ func NewEthAPIBackend(extRPCEnabled bool, eth *Ethereum, gpo *gasprice.Oracle, r
 	b.gasLimit = gasLimit
 	b.UsingOVM = UsingOVM
 	b.MaxCallDataSize = MaxCallDataSize
-	b.seqInfos = make(map[common.Address]string)
 	return b
 }
 func (b *EthAPIBackend) IsVerifier() bool {
@@ -552,7 +544,7 @@ func (b *EthAPIBackend) validateTx(ctx context.Context, tx *types.Transaction) e
 		return core.ErrInvalidSender
 	}
 	if rcfg.UsingOVM {
-		if rcfg.DeSeqBlock > 0 && header.Number.Uint64()+1 >= rcfg.DeSeqBlock {
+		if b.ChainConfig().IsTxpoolEnabled(header.Number) {
 			if state.GetNonce(from) > tx.Nonce() {
 				return core.ErrNonceTooLow
 			}
@@ -593,103 +585,6 @@ func (b *EthAPIBackend) ProxyEstimateGas(ctx context.Context, arg interface{}) (
 		return 0, errors.New("not support proxy estimate gas")
 	}
 	return b.eth.rpcClient.EstimateGasByArg(ctx, arg)
-}
-
-// Cache a rpc client until sequencer rpc url changed
-func (b *EthAPIBackend) EnsureSeqRpcClient(ctx context.Context, url string) error {
-	if b.seqRpcClient == nil || b.seqRpcUrl != url {
-		if b.seqRpcClient != nil {
-			b.seqRpcClient.Close()
-		}
-		ctxt, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		rpcClient, err := ethclient.DialContext(ctxt, url)
-		if err != nil {
-			return err
-		}
-		b.seqRpcClient = rpcClient
-		b.seqRpcUrl = url
-		return nil
-	}
-	return nil
-}
-
-func (b *EthAPIBackend) IsSequencerWorking() bool {
-	indexTime := b.eth.syncService.GetLatestIndexTime()
-	if indexTime == nil {
-		return false
-	}
-	if time.Now().Unix()-int64(*indexTime) > 60 {
-		return false
-	}
-	return true
-}
-
-func (b *EthAPIBackend) AddSequencerInfo(ctx context.Context, seq *types.SequencerInfo) error {
-	if strings.EqualFold(seq.SequencerAddress.String(), b.eth.syncService.SeqAddress) {
-		return errors.New("no need to add self address")
-	}
-	b.seqRwMutex.Lock()
-	defer b.seqRwMutex.Unlock()
-	b.seqInfos[seq.SequencerAddress] = seq.SequencerUrl
-	return nil
-}
-
-func (b *EthAPIBackend) GetSeqUrl(seqAddr common.Address) string {
-	b.seqRwMutex.RLock()
-	defer b.seqRwMutex.RUnlock()
-	url, ok := b.seqInfos[seqAddr]
-	if ok {
-		return url
-	}
-	for _, v := range b.seqInfos {
-		return v
-	}
-	return ""
-}
-
-func (b *EthAPIBackend) ListSequencerInfo(ctx context.Context) *types.SequencerInfoList {
-	var list types.SequencerInfoList
-	b.seqRwMutex.RLock()
-	for k, v := range b.seqInfos {
-		seq := types.SequencerInfo{
-			SequencerAddress: k,
-			SequencerUrl:     v,
-		}
-		list.SeqList = append(list.SeqList, seq)
-	}
-	b.seqRwMutex.RUnlock()
-
-	for i, seq := range list.SeqList {
-		l2Url := seq.SequencerUrl
-		err := b.EnsureSeqRpcClient(ctx, l2Url)
-		if err != nil {
-			log.Warn("Dial to a new proxy rpc client failed", "url", l2Url, "err", err)
-			// return err
-			continue
-		}
-		header, err := b.seqRpcClient.HeaderByNumber(context.TODO(), nil)
-		if err != nil {
-			log.Warn("HeaderByNumber ", "url", l2Url, "err", err)
-			// return err
-			continue
-		}
-		list.SeqList[i].SequencerHeight = header.Number.Uint64()
-	}
-	ownerHeight := b.eth.blockchain.CurrentBlock().Header().Number.Uint64()
-	seqOwner := types.SequencerInfo{
-		SequencerAddress: common.HexToAddress(b.eth.config.Rollup.SeqAddress),
-		SequencerUrl:     "localhost",
-		SequencerHeight:  ownerHeight,
-	}
-	list.SeqList = append(list.SeqList, seqOwner)
-	return &list
-}
-
-func (b *EthAPIBackend) SetPreRespan(ctx context.Context, oldAddress common.Address, newAddress common.Address, number uint64) error {
-	b.seqRwMutex.Lock()
-	defer b.seqRwMutex.Unlock()
-	return b.eth.syncService.RollupAdapter().SetPreRespan(oldAddress, newAddress, number)
 }
 
 func (b *EthAPIBackend) FinalizedBlockNumber() (uint64, error) {
