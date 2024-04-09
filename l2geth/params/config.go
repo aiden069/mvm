@@ -243,7 +243,7 @@ var (
 	MetisMainnetRollupConfig = &MVMRollupConfig{
 		SeqSetContract: common.HexToAddress("0x0fe382b74C3894B65c10E5C12ae60Bbd8FAf5b48"),
 		SeqSetHeight:   big.NewInt(15214531),
-		TxPoolHeight:   nil,
+		TxPoolHeight:   big.NewInt(16500000),
 	}
 
 	MetisSepoliaRollupConfig = &MVMRollupConfig{

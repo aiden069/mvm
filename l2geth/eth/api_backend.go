@@ -544,7 +544,7 @@ func (b *EthAPIBackend) validateTx(ctx context.Context, tx *types.Transaction) e
 		return core.ErrInvalidSender
 	}
 	if rcfg.UsingOVM {
-		if b.ChainConfig().IsTxpoolEnabled(header.Number) {
+		if b.ChainConfig().IsTxpoolEnabled(new(big.Int).Add(big.NewInt(1), header.Number)) {
 			if state.GetNonce(from) > tx.Nonce() {
 				return core.ErrNonceTooLow
 			}
