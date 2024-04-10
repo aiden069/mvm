@@ -113,9 +113,8 @@ type ProtocolManager struct {
 	gasInitialized                 bool
 	signer                         types.Signer
 
-	txQueues      chan<- *types.Block
-	syncService   *rollup.SyncService
-	txQueueCloser sync.Once
+	txQueues    chan<- *types.Block
+	syncService *rollup.SyncService
 }
 
 // NewProtocolManager returns a new Ethereum sub protocol manager. The Ethereum sub protocol manages peers capable
@@ -1091,13 +1090,16 @@ func (pm *ProtocolManager) updateGasPrice(blocks types.Blocks) {
 }
 
 func (pm *ProtocolManager) updateTxQueue(blocks types.Blocks) {
+	if pm.txQueues == nil {
+		return
+	}
+
 	log.Info("handle blocks inerted of fetcher or downloader", "len", len(blocks))
 	for _, block := range blocks {
 		select {
 		case <-pm.quitSync:
-			pm.txQueueCloser.Do(func() {
-				close(pm.txQueues)
-			})
+			close(pm.txQueues)
+			pm.txQueues = nil
 			return
 		case pm.txQueues <- block:
 		}
