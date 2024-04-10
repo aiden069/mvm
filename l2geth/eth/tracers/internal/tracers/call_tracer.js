@@ -61,7 +61,14 @@
 			if (this.callstack[left-1].calls === undefined) {
 				this.callstack[left-1].calls = [];
 			}
-			this.callstack[left-1].calls.push({type: op});
+			this.callstack[left-1].calls.push({
+				type:    op,
+				from:    toHex(log.contract.getAddress()),
+				to:      toHex(toAddress(log.stack.peek(0).toString(16))),
+				gasIn:   log.getGas(),
+				gasCost: log.getCost(),
+				value:   '0x' + db.getBalance(log.contract.getAddress()).toString(16)
+			});
 			return
 		}
 		// If a new method invocation is being done, add to the call stack
@@ -132,13 +139,12 @@
 				// If the call was a contract call, retrieve the gas usage and output
 				if (call.gas !== undefined) {
 					call.gasUsed = '0x' + bigInt(call.gasIn - call.gasCost + call.gas - log.getGas()).toString(16);
-
-					var ret = log.stack.peek(0);
-					if (!ret.equals(0)) {
-						call.output = toHex(log.memory.slice(call.outOff, call.outOff + call.outLen));
-					} else if (call.error === undefined) {
-						call.error = "internal failure"; // TODO(karalabe): surface these faults somehow
-					}
+				}
+				var ret = log.stack.peek(0);
+				if (!ret.equals(0)) {
+					call.output = toHex(log.memory.slice(call.outOff, call.outOff + call.outLen));
+				} else if (call.error === undefined) {
+					call.error = "internal failure"; // TODO(karalabe): surface these faults somehow
 				}
 				delete call.gasIn; delete call.gasCost;
 				delete call.outOff; delete call.outLen;
@@ -198,7 +204,6 @@
 			gasUsed: '0x' + bigInt(ctx.gasUsed).toString(16),
 			input:   toHex(ctx.input),
 			output:  toHex(ctx.output),
-			time:    ctx.time,
 		};
 		if (this.callstack[0].calls !== undefined) {
 			result.calls = this.callstack[0].calls;
@@ -208,13 +213,13 @@
 		} else if (ctx.error !== undefined) {
 			result.error = ctx.error;
 		}
-		if (result.error !== undefined) {
+		if (result.error !== undefined && (result.error !== "execution reverted" || result.output ==="0x")) {
 			delete result.output;
 		}
 		return this.finalize(result);
 	},
 
-	// finalize recreates a call object using the final desired field oder for json
+	// finalize recreates a call object using the final desired field order for json
 	// serialization. This is a nicety feature to pass meaningfully ordered results
 	// to users who don't interpret it, just display it.
 	finalize: function(call) {
@@ -228,7 +233,6 @@
 			input:   call.input,
 			output:  call.output,
 			error:   call.error,
-			time:    call.time,
 			calls:   call.calls,
 		}
 		for (var key in sorted) {
