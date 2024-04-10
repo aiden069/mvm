@@ -1500,8 +1500,7 @@ func (bc *BlockChain) InsertChainWithFunc(chain types.Blocks, f interface{}) (in
 	}
 
 	bc.blockProcFeed.Send(true)
-	// NOTE: 20210724
-	// defer bc.blockProcFeed.Send(false)
+	defer bc.blockProcFeed.Send(false)
 
 	// Remove already known canon-blocks
 	var (
@@ -1523,21 +1522,12 @@ func (bc *BlockChain) InsertChainWithFunc(chain types.Blocks, f interface{}) (in
 	// Pre-checks passed, start the full block imports
 	bc.wg.Add(1)
 	bc.chainmu.Lock()
-	// NOTE 20210724
-	// n, err := bc.insertChainWithFunc(chain, true, func() {
-	// 	bc.chainmu.Unlock()
-	// 	bc.wg.Done()
-
-	// 	if f != nil {
-	// 		f.(func())()
-	// 	}
-
-	// 	bc.blockProcFeed.Send(false)
-	// })
 
 	// resolve call function hang without return response
 	chn := make(chan int)
 	cherr := make(chan error)
+	defer close(chn)
+	defer close(cherr)
 
 	go bc.insertChainWithFuncAndCh(chain, true, chn, cherr, func() {
 		bc.chainmu.Unlock()
@@ -1546,14 +1536,11 @@ func (bc *BlockChain) InsertChainWithFunc(chain types.Blocks, f interface{}) (in
 		if f != nil {
 			f.(func())()
 		}
-		bc.blockProcFeed.Send(false)
+		// bc.blockProcFeed.Send(false)
 	})
 
 	n := <-chn
 	err := <-cherr
-
-	// bc.chainmu.Unlock()
-	// bc.wg.Done()
 
 	return n, err
 }
@@ -2134,6 +2121,7 @@ func (bc *BlockChain) insertChainWithFuncAndCh(chain types.Blocks, verifySeals b
 			cherr <- err
 			return it.index, err
 		}
+
 		proctime := time.Since(start)
 
 		// Update the metrics touched during block validation
