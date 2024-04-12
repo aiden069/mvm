@@ -64,7 +64,7 @@ func main() {
 
 	client, err := ethclient.DialContext(ctx, RPC)
 	if err != nil {
-
+		log.Fatalln("failed to dial rpc", err)
 	}
 	defer client.Close()
 
