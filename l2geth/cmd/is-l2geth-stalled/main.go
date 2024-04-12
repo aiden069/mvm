@@ -92,7 +92,7 @@ func main() {
 	case pending == 0:
 		stuck = local != nil && latest.Number.Uint64() == local.Number && now.Sub(local.LastSeen) > StalledDuration
 	case pending > 0:
-		stuck = pending != 0 && now.Sub(time.Unix(int64(latest.Time), 0)) > StalledDuration
+		stuck = now.Sub(time.Unix(int64(latest.Time), 0)) > StalledDuration
 	}
 
 	if stuck {
