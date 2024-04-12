@@ -584,3 +584,16 @@ func toCallArg(msg ethereum.CallMsg) interface{} {
 	}
 	return arg
 }
+
+func (ec *Client) TxPoolStatus(ctx context.Context) (pending, queued uint64, err error) {
+	type TxPoolStatus struct {
+		Pending hexutil.Uint `json:"pending"`
+		Queued  hexutil.Uint `json:"queued"`
+	}
+
+	var status TxPoolStatus
+	if err := ec.c.CallContext(ctx, &status, "txpool_status"); err != nil {
+		return 0, 0, err
+	}
+	return uint64(status.Pending), uint64(status.Queued), nil
+}
